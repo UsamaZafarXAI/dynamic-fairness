@@ -1,4 +1,4 @@
-# IJMI CXAI Reproducibility Package
+# Dynamic Fairness in Algorithmic Decision Support: A Longitudinal Simulation of Performative Bias in Healthcare Risk Prediction
 
 This repository reproduces the analysis for the manuscript:
 “Generating Prescriptive Counterfactual Explanations for Clinical Decline”.
