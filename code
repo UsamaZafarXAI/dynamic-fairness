@@ -1,0 +1,27 @@
+mimic_base_path: "/path/to/mimic-iv-3.1"
+eicu_base_path: "/path/to/eicu-crd-2.0"
+output_path: "./outputs"
+processed_data_path: "./outputs/processed_hourly_data_FULL"
+
+random_seed: 42
+features:
+  - "Heart Rate"
+  - "Mean Arterial Pressure"
+  - "SpO2"
+  - "Lactate"
+  - "Creatinine"
+
+epochs: 15
+batch_size: 128
+learning_rate: 0.001
+early_stop_patience: 3
+
+high_risk_threshold: 0.7
+population_sample_size: 50
+
+cf_steps_case: 150
+cf_lr_case: 0.05
+cf_lambda_case: 0.1
+cf_steps_population: 50
+cf_lr_population: 0.05
+cf_lambda_population: 0.1
