@@ -1,27 +1,520 @@
-mimic_base_path: "/path/to/mimic-iv-3.1"
-eicu_base_path: "/path/to/eicu-crd-2.0"
-output_path: "./outputs"
-processed_data_path: "./outputs/processed_hourly_data_FULL"
 
-random_seed: 42
-features:
-  - "Heart Rate"
-  - "Mean Arterial Pressure"
-  - "SpO2"
-  - "Lactate"
-  - "Creatinine"
+---
 
-epochs: 15
-batch_size: 128
-learning_rate: 0.001
-early_stop_patience: 3
+### `main.py`
 
-high_risk_threshold: 0.7
-population_sample_size: 50
+```python
+import os
+import gc
+import argparse
+import pickle
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import seaborn as sns
+import tensorflow as tf
+import yaml
 
-cf_steps_case: 150
-cf_lr_case: 0.05
-cf_lambda_case: 0.1
-cf_steps_population: 50
-cf_lr_population: 0.05
-cf_lambda_population: 0.1
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, roc_curve
+
+
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    tf.random.set_seed(seed)
+
+
+def load_and_process_data(cfg, mimic_feature_map, eicu_feature_map):
+    processed = cfg["processed_data_path"]
+    os.makedirs(processed, exist_ok=True)
+
+    mimic_hourly_file = os.path.join(processed, "mimic_hourly_imputed.csv")
+    mimic_cohort_file = os.path.join(processed, "mimic_cohort.csv")
+    eicu_hourly_file = os.path.join(processed, "eicu_hourly_imputed.csv")
+    eicu_cohort_file = os.path.join(processed, "eicu_cohort.csv")
+
+    if all(os.path.exists(f) for f in [mimic_hourly_file, mimic_cohort_file, eicu_hourly_file, eicu_cohort_file]):
+        print("Loading cached preprocessed files")
+        return (
+            pd.read_csv(mimic_hourly_file),
+            pd.read_csv(mimic_cohort_file),
+            pd.read_csv(eicu_hourly_file),
+            pd.read_csv(eicu_cohort_file),
+        )
+
+    mimic_base = cfg["mimic_base_path"]
+    mimic_icu = os.path.join(mimic_base, "icu")
+    mimic_hosp = os.path.join(mimic_base, "hosp")
+    eicu_base = cfg["eicu_base_path"]
+
+    mimic_hourly, mimic_cohort = load_mimic(mimic_icu, mimic_hosp, mimic_feature_map, cfg["output_path"])
+    if mimic_hourly is None:
+        raise RuntimeError("MIMIC preprocessing failed")
+    mimic_hourly.to_csv(mimic_hourly_file, index=False)
+    mimic_cohort.to_csv(mimic_cohort_file, index=False)
+
+    eicu_hourly, eicu_cohort = load_eicu(eicu_base, eicu_feature_map)
+    if eicu_hourly is None:
+        raise RuntimeError("eICU preprocessing failed")
+    eicu_hourly.to_csv(eicu_hourly_file, index=False)
+    eicu_cohort.to_csv(eicu_cohort_file, index=False)
+
+    gc.collect()
+    return mimic_hourly, mimic_cohort, eicu_hourly, eicu_cohort
+
+
+def load_mimic(icu_path, hosp_path, feature_map, output_path):
+    try:
+        icu_stays = pd.read_csv(
+            os.path.join(icu_path, "icustays.csv.gz"),
+            compression="gzip",
+            usecols=["subject_id", "stay_id", "intime"],
+        )
+        patients = pd.read_csv(
+            os.path.join(hosp_path, "patients.csv.gz"),
+            compression="gzip",
+            usecols=["subject_id", "gender", "anchor_age", "anchor_year"],
+        )
+
+        icu_stays = (
+            icu_stays.sort_values(by=["subject_id", "intime"])
+            .groupby("subject_id")
+            .first()
+            .reset_index()
+        )
+
+        adult_stays = icu_stays.merge(patients, on="subject_id", how="inner")
+        adult_stays["age"] = (
+            pd.to_datetime(adult_stays["intime"]).dt.year
+            - adult_stays["anchor_year"]
+            + adult_stays["anchor_age"]
+        )
+        adult_stays = adult_stays[adult_stays["age"] >= 18].copy()
+
+        stay_ids = set(adult_stays["stay_id"])
+        subject_ids = set(adult_stays["subject_id"])
+
+        vitals_itemids = {feature_map["Heart Rate"], feature_map["Mean Arterial Pressure"], feature_map["SpO2"]}
+        chunk_list = []
+        reader = pd.read_csv(
+            os.path.join(icu_path, "chartevents.csv.gz"),
+            compression="gzip",
+            usecols=["stay_id", "charttime", "itemid", "valuenum"],
+            dtype={"stay_id": "Int32", "itemid": "Int32", "valuenum": "float32"},
+            parse_dates=["charttime"],
+            chunksize=10_000_000,
+        )
+        for chunk in reader:
+            chunk.dropna(subset=["stay_id", "valuenum"], inplace=True)
+            chunk = chunk[chunk["stay_id"].isin(stay_ids) & chunk["itemid"].isin(vitals_itemids)]
+            if not chunk.empty:
+                chunk_list.append(chunk)
+        vitals = pd.concat(chunk_list, ignore_index=True) if chunk_list else pd.DataFrame()
+
+        labs_itemids = {feature_map["Lactate"], feature_map["Creatinine"]}
+        chunk_list = []
+        reader = pd.read_csv(
+            os.path.join(hosp_path, "labevents.csv.gz"),
+            compression="gzip",
+            usecols=["subject_id", "charttime", "itemid", "valuenum"],
+            dtype={"subject_id": "Int32", "itemid": "Int32", "valuenum": "float32"},
+            parse_dates=["charttime"],
+            chunksize=5_000_000,
+        )
+        for chunk in reader:
+            chunk = chunk[chunk["subject_id"].isin(subject_ids) & chunk["itemid"].isin(labs_itemids)]
+            if not chunk.empty:
+                chunk_list.append(chunk)
+        labs = pd.concat(chunk_list, ignore_index=True) if chunk_list else pd.DataFrame()
+
+        labs = labs.merge(adult_stays[["subject_id", "stay_id", "intime"]], on="subject_id")
+
+        itemid_to_feature = {v: k for k, v in feature_map.items()}
+        vitals["feature"] = vitals["itemid"].map(itemid_to_feature)
+        labs["feature"] = labs["itemid"].map(itemid_to_feature)
+
+        all_events = pd.concat(
+            [
+                vitals[["stay_id", "charttime", "feature", "valuenum"]],
+                labs[["stay_id", "charttime", "feature", "valuenum"]],
+            ],
+            ignore_index=True,
+        )
+
+        all_events = all_events.merge(adult_stays[["stay_id", "intime"]], on="stay_id")
+        all_events["hours_in"] = (all_events["charttime"] - pd.to_datetime(all_events["intime"])).dt.total_seconds() / 3600.0
+        events_24 = all_events[all_events["hours_in"].between(0, 24)].copy()
+        events_24["hour"] = events_24["hours_in"].astype(int)
+
+        hourly_raw = events_24.groupby(["stay_id", "hour", "feature"])["valuenum"].mean().unstack()
+
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(hourly_raw.isnull().T, cbar=False, cmap="viridis")
+        plt.title("Figure 1: Data Completeness Before Imputation", fontsize=16)
+        plt.xlabel("Patient Stays")
+        plt.ylabel("Features")
+        fig1_path = os.path.join(output_path, "figure1_completeness_heatmap.png")
+        plt.savefig(fig1_path, bbox_inches="tight")
+
+        full_index = pd.MultiIndex.from_product(
+            [hourly_raw.index.get_level_values("stay_id").unique(), range(24)],
+            names=["stay_id", "hour"],
+        )
+        hourly_imputed = hourly_raw.reindex(full_index).groupby("stay_id").ffill().bfill().reset_index()
+
+        return hourly_imputed, adult_stays
+
+    except Exception as e:
+        print("MIMIC error:", e)
+        return None, None
+
+
+def load_eicu(eicu_path, feature_map):
+    try:
+        patients = pd.read_csv(
+            os.path.join(eicu_path, "patient.csv.gz"),
+            compression="gzip",
+            usecols=["patientunitstayid", "gender", "age", "unittype", "unitdischargestatus"],
+        )
+        patients["age"] = pd.to_numeric(patients["age"], errors="coerce")
+        adult = patients[(patients["age"] >= 18) & (patients["unittype"] == "Med-Surg ICU")].copy()
+        adult_stay_ids = set(adult["patientunitstayid"])
+
+        vital_cols = list(feature_map.values())[:3]
+        vital_chunks = []
+        reader = pd.read_csv(
+            os.path.join(eicu_path, "vitalPeriodic.csv.gz"),
+            compression="gzip",
+            usecols=["patientunitstayid", "observationoffset"] + vital_cols,
+            chunksize=5_000_000,
+        )
+        for chunk in reader:
+            chunk = chunk[
+                chunk["patientunitstayid"].isin(adult_stay_ids)
+                & chunk["observationoffset"].between(0, 24 * 60)
+            ]
+            if not chunk.empty:
+                vital_chunks.append(chunk)
+        vitals_24h = pd.concat(vital_chunks, ignore_index=True) if vital_chunks else pd.DataFrame()
+
+        lab_names = list(feature_map.values())[3:]
+        lab_chunks = []
+        reader = pd.read_csv(
+            os.path.join(eicu_path, "lab.csv.gz"),
+            compression="gzip",
+            usecols=["patientunitstayid", "labresultoffset", "labname", "labresult"],
+            chunksize=5_000_000,
+        )
+        for chunk in reader:
+            chunk = chunk[
+                chunk["patientunitstayid"].isin(adult_stay_ids)
+                & chunk["labresultoffset"].between(0, 24 * 60)
+                & chunk["labname"].isin(lab_names)
+            ]
+            if not chunk.empty:
+                lab_chunks.append(chunk)
+        labs_24h = pd.concat(lab_chunks, ignore_index=True) if lab_chunks else pd.DataFrame()
+
+        labs_pivot = labs_24h.pivot_table(
+            index=["patientunitstayid", "labresultoffset"],
+            columns="labname",
+            values="labresult",
+        ).reset_index()
+
+        combined = pd.concat(
+            [
+                vitals_24h.rename(columns={"observationoffset": "offset"}),
+                labs_pivot.rename(columns={"labresultoffset": "offset"}),
+            ],
+            ignore_index=True,
+        )
+
+        combined.rename(columns={"patientunitstayid": "stay_id"}, inplace=True)
+        combined.rename(columns={v: k for k, v in feature_map.items()}, inplace=True)
+        combined["hour"] = (combined["offset"] / 60).astype(int)
+
+        hourly = combined.groupby(["stay_id", "hour"]).mean(numeric_only=True).drop(columns="offset", errors="ignore")
+
+        full_index = pd.MultiIndex.from_product(
+            [hourly.index.get_level_values("stay_id").unique(), range(24)],
+            names=["stay_id", "hour"],
+        )
+        hourly_imputed = hourly.reindex(full_index).groupby("stay_id").ffill().bfill().reset_index()
+
+        return hourly_imputed, adult
+
+    except Exception as e:
+        print("eICU error:", e)
+        return None, None
+
+
+def build_model(n_features, learning_rate):
+    inputs = tf.keras.layers.Input(shape=(24, n_features))
+    x = tf.keras.layers.LSTM(64, activation="relu", return_sequences=True)(inputs)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.LSTM(32, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dense(16, activation="relu")(x)
+    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=float(learning_rate)),
+        loss="binary_crossentropy",
+        metrics=["AUC"],
+    )
+    return model
+
+
+def evaluate_subgroups(demos_test, y_test, y_pred_proba, output_path):
+    demos = demos_test.copy()
+    demos["y_test"] = y_test
+    demos["y_pred_proba"] = y_pred_proba
+    demos["age_group"] = pd.cut(demos["age"], bins=[0, 65, np.inf], labels=["<65", ">=65"])
+
+    rows = []
+    for gname, gdf in demos.groupby("age_group"):
+        if gdf["y_test"].nunique() > 1:
+            rows.append({"Subgroup": f"Age {gname}", "AUC": roc_auc_score(gdf["y_test"], gdf["y_pred_proba"]), "N": len(gdf)})
+    for gname, gdf in demos.groupby("gender"):
+        if gdf["y_test"].nunique() > 1:
+            rows.append({"Subgroup": f"Gender {gname}", "AUC": roc_auc_score(gdf["y_test"], gdf["y_pred_proba"]), "N": len(gdf)})
+
+    table3 = pd.DataFrame(rows)
+    table3_path = os.path.join(output_path, "table3_subgroup_performance.csv")
+    table3.to_csv(table3_path, index=False)
+    return table3
+
+
+def generate_cf(input_x, target_y, model, n_steps, lr, lam):
+    input_x = tf.convert_to_tensor(input_x, dtype=tf.float32)
+    cf_x = tf.Variable(input_x)
+    target_y = tf.constant([[target_y]], dtype=tf.float32)
+    opt = tf.optimizers.Adam(lr)
+
+    for _ in range(int(n_steps)):
+        with tf.GradientTape() as tape:
+            pred = model(cf_x, training=False)
+            pred_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(target_y, pred))
+            prox_loss = tf.reduce_mean(tf.square(cf_x - input_x))
+            loss = pred_loss + float(lam) * prox_loss
+        grads = tape.gradient(loss, cf_x)
+        opt.apply_gradients([(grads, cf_x)])
+
+    return cf_x.numpy()
+
+
+def run(cfg):
+    os.makedirs(cfg["output_path"], exist_ok=True)
+    os.makedirs(cfg["processed_data_path"], exist_ok=True)
+    set_seed(int(cfg.get("random_seed", 42)))
+
+    mimic_feature_map = {
+        "Heart Rate": 220045,
+        "Mean Arterial Pressure": 220181,
+        "SpO2": 220277,
+        "Lactate": 50813,
+        "Creatinine": 50912,
+    }
+    eicu_feature_map = {
+        "Heart Rate": "heartrate",
+        "Mean Arterial Pressure": "systemicmean",
+        "SpO2": "sao2",
+        "Lactate": "lactate",
+        "Creatinine": "creatinine",
+    }
+    features = cfg.get("features", list(mimic_feature_map.keys()))
+
+    mimic_hourly, mimic_cohort, eicu_hourly, eicu_cohort = load_and_process_data(cfg, mimic_feature_map, eicu_feature_map)
+
+    admissions = pd.read_csv(
+        os.path.join(cfg["mimic_base_path"], "hosp", "admissions.csv.gz"),
+        compression="gzip",
+        usecols=["subject_id", "hospital_expire_flag"],
+    )
+    mimic_cohort = mimic_cohort.merge(admissions.drop_duplicates(subset=["subject_id"]), on="subject_id", how="left")
+    mimic_outcomes = mimic_cohort[["stay_id", "gender", "age", "hospital_expire_flag"]].rename(columns={"hospital_expire_flag": "mortality"})
+
+    eicu_outcomes = eicu_cohort[["patientunitstayid", "gender", "age", "unitdischargestatus"]].copy()
+    eicu_outcomes["mortality"] = (eicu_outcomes["unitdischargestatus"] == "Expired").astype(int)
+    eicu_outcomes = eicu_outcomes.rename(columns={"patientunitstayid": "stay_id"})
+
+    mimic_df = mimic_hourly.merge(mimic_outcomes, on="stay_id", how="inner")
+    eicu_df = eicu_hourly.merge(eicu_outcomes, on="stay_id", how="inner")
+    combined_df = pd.concat([mimic_df, eicu_df], ignore_index=True).dropna(subset=features)
+
+    grouped = combined_df.groupby("stay_id")
+    X_seq = [g[features].values for _, g in grouped]
+    y_seq = [g["mortality"].iloc[0] for _, g in grouped]
+    demos_seq = [g[["age", "gender"]].iloc[0] for _, g in grouped]
+    stay_ids = np.array([g["stay_id"].iloc[0] for _, g in grouped])
+
+    demos = pd.DataFrame(demos_seq)
+    X_padded = tf.keras.preprocessing.sequence.pad_sequences(X_seq, maxlen=24, dtype="float32", padding="post", truncating="post")
+    y = np.array(y_seq)
+
+    X_train, X_test, y_train, y_test, stay_ids_train, stay_ids_test, demos_train, demos_test = train_test_split(
+        X_padded, y, stay_ids, demos, test_size=0.2, random_state=42, stratify=y
+    )
+
+    scaler = StandardScaler().fit(X_train.reshape(-1, X_train.shape[-1]))
+    X_train_scaled = scaler.transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+    X_test_scaled = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+
+    with open(os.path.join(cfg["output_path"], "data_scaler.pkl"), "wb") as f:
+        pickle.dump(scaler, f)
+
+    model = build_model(len(features), cfg.get("learning_rate", 0.001))
+    model.fit(
+        X_train_scaled,
+        y_train,
+        epochs=int(cfg.get("epochs", 15)),
+        batch_size=int(cfg.get("batch_size", 128)),
+        validation_split=0.1,
+        verbose=1,
+        callbacks=[
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=int(cfg.get("early_stop_patience", 3)),
+                restore_best_weights=True,
+            )
+        ],
+    )
+    model.save(os.path.join(cfg["output_path"], "temporal_mortality_model.keras"))
+
+    y_pred_proba = model.predict(X_test_scaled).ravel()
+    y_pred_class = (y_pred_proba > 0.5).astype(int)
+
+    table2 = pd.DataFrame(
+        {
+            "Metric": ["AUC", "Accuracy", "Precision", "Recall", "F1-Score"],
+            "Score": [
+                roc_auc_score(y_test, y_pred_proba),
+                accuracy_score(y_test, y_pred_class),
+                precision_score(y_test, y_pred_class, zero_division=0),
+                recall_score(y_test, y_pred_class),
+                f1_score(y_test, y_pred_class),
+            ],
+        }
+    )
+    table2.to_csv(os.path.join(cfg["output_path"], "table2_model_performance.csv"), index=False)
+
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f"LSTM Oracle (AUC = {table2.Score.iloc[0]:.3f})")
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.title("Figure 2: ROC Curve of the LSTM Oracle", fontsize=16)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(cfg["output_path"], "figure2_roc_curve.png"), bbox_inches="tight")
+
+    table3 = evaluate_subgroups(demos_test, y_test, y_pred_proba, cfg["output_path"])
+
+    high_risk_thr = float(cfg.get("high_risk_threshold", 0.7))
+    high_risk_indices = np.where((y_test == 1) & (y_pred_proba > high_risk_thr))[0]
+    if len(high_risk_indices) == 0:
+        high_risk_indices = np.where(y_test == 1)[0]
+        if len(high_risk_indices) == 0:
+            raise ValueError("No mortality cases in test set")
+
+    query_index = int(high_risk_indices[0])
+    query_stay_id = stay_ids_test[query_index]
+
+    original_x_scaled = np.expand_dims(X_test_scaled[query_index], axis=0)
+    original_x_unscaled = scaler.inverse_transform(original_x_scaled.reshape(-1, len(features))).reshape(original_x_scaled.shape)
+
+    cf_case = generate_cf(
+        original_x_scaled,
+        0.0,
+        model,
+        cfg.get("cf_steps_case", 150),
+        cfg.get("cf_lr_case", 0.05),
+        cfg.get("cf_lambda_case", 0.1),
+    )
+    cf_case_unscaled = scaler.inverse_transform(cf_case.reshape(-1, len(features))).reshape(cf_case.shape)
+
+    original_df = pd.DataFrame(original_x_unscaled[0], columns=features)
+    original_df["hour"] = range(24)
+    cf_df = pd.DataFrame(cf_case_unscaled[0], columns=features)
+    cf_df["hour"] = range(24)
+
+    fig3, axes = plt.subplots(len(features), 1, figsize=(16, 13), sharex=True, constrained_layout=True)
+    fig3.suptitle(f"Figure 3: Counterfactual Case Study for Patient {query_stay_id}", fontsize=18)
+
+    for i, feature in enumerate(features):
+        sns.lineplot(data=original_df, x="hour", y=feature, ax=axes[i], color="red", label="Actual Trajectory", lw=2.5)
+        sns.lineplot(data=cf_df, x="hour", y=feature, ax=axes[i], color="green", label="Counterfactual")
+        axes[i].set_ylabel(feature)
+        axes[i].grid(True, linestyle="--", alpha=0.5)
+
+        changes = np.abs(original_df[feature] - cf_df[feature])
+        norm = (changes - changes.min()) / (changes.max() - changes.min() + 1e-6)
+        y0 = axes[i].get_ylim()[0]
+        y1 = axes[i].get_ylim()[1]
+        ribbon_h = (y1 - y0) * 0.05
+
+        for j in range(24):
+            axes[i].add_patch(patches.Rectangle((j, y0), 1, ribbon_h, facecolor="orange", alpha=float(norm.iloc[j]) * 0.7, edgecolor=None))
+
+    axes[-1].set_xlabel("Hours Since ICU Admission (Orange ribbon intensity indicates magnitude of change)")
+    fig3.legend(loc="outside right")
+    plt.savefig(os.path.join(cfg["output_path"], "figure3_counterfactual_case_study.png"), bbox_inches="tight")
+
+    total_changes = np.sum(np.abs(original_x_unscaled[0] - cf_case_unscaled[0]), axis=0)
+    table4 = pd.DataFrame({"Feature": features, "Total_Change": total_changes}).sort_values("Total_Change", ascending=False)
+    table4.to_csv(os.path.join(cfg["output_path"], "table4_feature_importance.csv"), index=False)
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x="Total_Change", y="Feature", data=table4)
+    plt.title("Figure 4: Feature Importance for Case Study Patient", fontsize=16)
+    plt.xlabel("Total Absolute Change Required to Alter Outcome")
+    plt.savefig(os.path.join(cfg["output_path"], "figure4_feature_importance.png"), bbox_inches="tight")
+
+    pop_n = int(cfg.get("population_sample_size", 50))
+    pop_steps = cfg.get("cf_steps_population", 50)
+    pop_lr = cfg.get("cf_lr_population", 0.05)
+    pop_lam = cfg.get("cf_lambda_population", 0.1)
+
+    population_changes = []
+    sample_size = min(pop_n, len(high_risk_indices))
+
+    for idx in high_risk_indices[:sample_size]:
+        p_original_scaled = np.expand_dims(X_test_scaled[int(idx)], axis=0)
+        p_cf = generate_cf(p_original_scaled, 0.0, model, pop_steps, pop_lr, pop_lam)
+        p_original_unscaled = scaler.inverse_transform(p_original_scaled.reshape(-1, len(features)))
+        p_cf_unscaled = scaler.inverse_transform(p_cf.reshape(-1, len(features)))
+        change = (p_cf_unscaled - p_original_unscaled) / (p_original_unscaled + 1e-6)
+        population_changes.append(np.mean(change, axis=0))
+
+    population_df = pd.DataFrame(population_changes, columns=features)
+    melted = population_df.melt(var_name="Feature", value_name="Average Percent Change")
+
+    plt.figure(figsize=(12, 8))
+    sns.boxplot(x="Average Percent Change", y="Feature", data=melted)
+    plt.axvline(0, color="r", linestyle="--")
+    plt.title("Figure 5: Population-Level Counterfactual Impact", fontsize=16)
+    plt.xlabel("Average Percent Change Required to Flip Outcome to Survival")
+    plt.savefig(os.path.join(cfg["output_path"], "figure5_population_impact.png"), bbox_inches="tight")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+    cfg = load_config(args.config)
+    run(cfg)
+
+
+if __name__ == "__main__":
+    main()
