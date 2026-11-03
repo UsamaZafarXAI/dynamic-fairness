@@ -20,8 +20,8 @@ This repository contains no patient-level data. Every file in `results/` is an a
 | `notebooks/01_jbhi_pipeline.ipynb` | Main analysis: MIMIC-IV cohort construction, hybrid LSTM and tabular baselines, static fairness audit, longitudinal simulation (30 runs of 15 retraining cycles), Dynamic Adaptive Fairness controller, exogenous-shift experiment, SHAP stability analysis, and the eICU cross-institutional audit |
 | `notebooks/02_missingness_smallsample.ipynb` | Missing-data and small-sample reporting: pre-imputation missingness by predictor, intersectional subgroup, and hospital; subgroup event counts with Wilson intervals; minimum-cell, bootstrap, and empirical-Bayes gap estimates |
 | `src/smallsample_audit.py` | Functions for Wilson score intervals, minimum-cell gaps, within-subgroup bootstrap of max-min gaps, and beta-binomial empirical-Bayes shrinkage |
-| `results/r3_missingness/` | Outputs of notebook 02 (manuscript Table II; Supplementary Tables S1 to S7) |
-| `results/r3_audit/` | Subgroup mortality with Wilson intervals (Table III) and test-set subgroup counts for the t = 0 audit (Supplementary Table S8) |
+| `results/missing_data/` | Outputs of notebook 02 (manuscript Table II; Supplementary Tables S1 to S7) |
+| `results/subgroup_audit/` | Subgroup mortality with Wilson intervals (Table III) and test-set subgroup counts for the t = 0 audit (Supplementary Table S8) |
 | `requirements.txt` | Package versions |
 
 ## Reproducing the results
