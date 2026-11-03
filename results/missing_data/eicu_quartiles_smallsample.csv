@@ -1,0 +1,5 @@
+size_quartile,hospitals,median_n,median_events,tpr_raw,tpr_eb,tpr_mincell,hosp_with_2plus_eligible_cells,for_raw,for_eb
+Q1,49,136.0,5.0,1.0,0.022,,0,0.077,0.015
+Q2,48,407.5,19.0,1.0,0.041,0.183,5,0.081,0.023
+Q3,48,860.5,38.0,1.0,0.059,0.144,20,0.11,0.031
+Q4,48,2091.0,121.0,1.0,0.081,0.192,48,0.143,0.032

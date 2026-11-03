@@ -1,0 +1,21 @@
+predictor,n_missing,pct_missing,subgroup_min_pct,subgroup_max_pct,chi2_p_subgroup
+anchor_age,0,0.0,0.0,0.0,
+Heart Rate (24h),19,0.37,0.0,0.98,0.8739
+Non Invasive Blood Pressure systolic (24h),229,4.48,0.0,9.43,0.0001
+Respiratory Rate (24h),20,0.39,0.0,0.98,0.9165
+O2 saturation pulseoxymetry (24h),30,0.59,0.0,2.07,0.4969
+Temperature Fahrenheit (24h),187,3.66,0.0,8.88,0.0143
+Creatinine,35,0.69,0.0,2.96,0.0316
+White Blood Cells,41,0.8,0.0,2.96,0.0083
+Potassium,35,0.69,0.0,2.96,0.0316
+Bicarbonate,35,0.69,0.0,2.96,0.0316
+Hemoglobin,40,0.78,0.0,2.96,0.0039
+Glucose,35,0.69,0.0,2.96,0.0316
+Lactate,573,11.22,5.1,13.86,0.0191
+SOFA respiratory,2507,49.1,30.1,61.02,0.0
+SOFA coagulation,41,0.8,0.0,2.96,0.0083
+SOFA liver,774,15.16,7.14,27.12,0.0
+SOFA cardiovascular,2915,57.09,38.27,72.88,0.0
+SOFA CNS,5083,99.55,98.47,100.0,0.572
+SOFA renal,35,0.69,0.0,2.96,0.0316
+comorbidity_index,0,0.0,0.0,0.0,
