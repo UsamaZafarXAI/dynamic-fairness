@@ -1,60 +1,45 @@
-# A Multi-Model Framework for Explainable Sepsis Mortality Prediction with Dynamic Fairness and Drift Analysis
+# Dynamic Fairness and Drift Analysis for Sepsis Mortality Prediction
 
-This repository reproduces the analysis for the manuscript submitted to IEEE Journal of Biomedical and Health Informatics (JBHI-00470-2026).
+Code and aggregate results for:
 
-**No patient-level data is included.**
+> U. Zafar and F. Wu, "A Multi-Model Framework for Explainable Sepsis Mortality Prediction with Dynamic Fairness and Drift Analysis," *IEEE Journal of Biomedical and Health Informatics*, manuscript JBHI-00470-2026.
 
-## Data Access
+## Data access
 
-Credentialed access via PhysioNet is required:
+The analyses use two PhysioNet databases, both available to credentialed users under their data use agreements:
 
-- [MIMIC-IV](https://physionet.org/content/mimiciv/)
-- [eICU Collaborative Research Database](https://physionet.org/content/eicu-crd/)
+- MIMIC-IV (development cohort, 5,106 ICU stays)
+- eICU Collaborative Research Database v2.0 (cross-institutional cohort, 208 hospitals)
 
-Expected MIMIC-IV directory structure:
+This repository contains no patient-level data. Every file in `results/` is an aggregate table.
 
-```
-<mimic_base_path>/
-    hosp/
-        patients.csv
-        admissions.csv
-        diagnoses_icd.csv
-        labevents.csv
-    icu/
-        icustays.csv
-        chartevents.csv
-        inputevents.csv
-        procedureevents.csv
-```
+## Repository structure
 
-## Installation
+| Path | Contents |
+|---|---|
+| `notebooks/01_jbhi_pipeline.ipynb` | Main analysis: MIMIC-IV cohort construction, hybrid LSTM and tabular baselines, static fairness audit, longitudinal simulation (30 runs of 15 retraining cycles), Dynamic Adaptive Fairness controller, exogenous-shift experiment, SHAP stability analysis, and the eICU cross-institutional audit |
+| `notebooks/02_missingness_smallsample.ipynb` | Missing-data and small-sample reporting: pre-imputation missingness by predictor, intersectional subgroup, and hospital; subgroup event counts with Wilson intervals; minimum-cell, bootstrap, and empirical-Bayes gap estimates |
+| `src/smallsample_audit.py` | Functions for Wilson score intervals, minimum-cell gaps, within-subgroup bootstrap of max-min gaps, and beta-binomial empirical-Bayes shrinkage |
+| `results/r3_missingness/` | Outputs of notebook 02 (manuscript Table II; Supplementary Tables S1 to S7) |
+| `results/r3_audit/` | Subgroup mortality with Wilson intervals (Table III) and test-set subgroup counts for the t = 0 audit (Supplementary Table S8) |
+| `requirements.txt` | Package versions |
 
-Python 3.12 recommended.
+## Reproducing the results
 
-```bash
-pip install -r requirements.txt
-```
+1. Obtain MIMIC-IV and eICU-CRD from PhysioNet.
+2. Install the dependencies:
 
-## Usage
+   ```
+   pip install -r requirements.txt
+   ```
 
-```bash
-python main.py --config config.yaml
-```
+3. Set the data paths at the top of each notebook (`ROOT`, `MIMIC_HOSP`, `MIMIC_ICU`, `EICU`).
+4. Run `01_jbhi_pipeline.ipynb` for the results reported in the manuscript, then `02_missingness_smallsample.ipynb` for the missing-data and small-sample tables.
 
-Edit `config.yaml` to set `mimic_base_path` and `output_path` before running.
+Both notebooks were executed on Kaggle (CPU only). scikit-learn is pinned to version 1.6.1 because Random Forest outputs vary across library versions. Random seeds are fixed: `random_state = 42` for the train-test split and models, and seed 42 + 100r for simulation run r.
 
-## Pipeline
+Notebook 02 prints two checks before writing its tables: the MIMIC-IV cohort size and mortality (5,106 stays; 0.2793) and the eICU AUC of the common-feature Random Forest (0.7431; 95% CI 0.7375 to 0.7485).
 
-The script executes the following steps in order:
+## Citation
 
-1. **Preprocessing** — Extracts sepsis cohort from MIMIC-IV, computes 17 predictors (5 temporal vital signs + 7 laboratory values + vasopressor use + mechanical ventilation + SOFA score + age + comorbidity index), and assigns intersectional demographic groups.
-2. **LSTM training** — Trains a hybrid temporal-static LSTM on 80% of the cohort with 1,000-iteration bootstrap confidence intervals on AUC.
-3. **Baseline comparison** — Evaluates Logistic Regression, Random Forest, XGBoost, LightGBM, and a SOFA-only clinical baseline on the held-out 20%.
-4. **Static fairness audit** — Computes TPR gap, σTPR, FPR gap, and FOR gap at t=0 for both baseline and static reweighing models.
-5. **Longitudinal simulation** — Runs 30 independent 15-cycle retraining simulations with performative feedback and the Dynamic Adaptive Fairness (DAF) controller. Reports Friedman and Wilcoxon statistics on TPR and FPR gaps.
-6. **Robustness experiment** — Introduces an exogenous covariate shift at t=8 (lactate +30%, SOFA +2) to test DAF generalization to unseen distribution shifts.
-7. **SHAP analysis** — Computes Spearman rank correlation of feature importance between t=0 and t=14.
-
-## Outputs
-
-All figures and tables are saved to `output_path`
+If you use this code, please cite the article listed above.
