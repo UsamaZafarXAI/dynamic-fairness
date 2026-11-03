@@ -1,9 +1,0 @@
-,Heart Rate,Non Invasive Blood Pressure systolic,Respiratory Rate,O2 saturation pulseoxymetry,Temperature Fahrenheit
-count,5106.0,5106.0,5106.0,5106.0,5106.0
-mean,9.26,32.15,9.82,11.68,72.31
-std,16.92,34.28,17.5,19.05,11.31
-min,0.0,0.0,0.0,0.0,4.17
-25%,0.0,4.17,0.0,0.0,66.67
-50%,4.17,16.67,4.17,4.17,70.83
-75%,8.33,62.5,12.5,12.5,75.0
-max,100.0,100.0,100.0,100.0,100.0
