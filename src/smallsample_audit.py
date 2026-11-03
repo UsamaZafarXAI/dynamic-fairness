@@ -1,13 +1,13 @@
-"""JBHI-00470-2026.R3: tables requested by the Associate Editor.
+"""Missing-data and small-sample subgroup statistics.
 
-Inputs (export these from the notebook that produced the published results):
-  --mimic        MIMIC-IV cohort BEFORE imputation (one row per stay; includes
-                 intersectional_group, mortality_in_hospital, and the 17 predictors)
+Inputs:
+  --mimic        MIMIC-IV cohort before imputation (one row per stay; includes
+                 intersectional_group, mortality_in_hospital, and the predictors)
   --audit        one or more CSVs of t=0 test-set predictions with columns
-                 model, y, pred, group  (Baseline and Static Reweighing)
-  --eicu         eICU cohort BEFORE imputation, with hospitalid and intersectional_group
+                 model, y, pred, group
+  --eicu         eICU cohort before imputation, with hospitalid and intersectional_group
   --eicu-preds   eICU predictions with columns y, pred, group, hospitalid
-Outputs go to --out: CSV tables plus summary.txt with the numbers for the manuscript.
+Outputs are written to --out as CSV tables and a summary.txt file.
 """
 import argparse, glob, os
 import numpy as np
@@ -207,7 +207,7 @@ def main():
     ap.add_argument("--min-hosp-n", type=int, default=30)
     ap.add_argument("--boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--out", default="r3_out")
+    ap.add_argument("--out", default="tables_out")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     lines = []
